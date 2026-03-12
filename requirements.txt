@@ -9,4 +9,4 @@ selenium
 webdriver-manager
 lightgbm
 scikit-learn
-openai
+openaiplotly>=5.0.0
