@@ -1,0 +1,12 @@
+streamlit
+pandas
+numpy
+requests
+beautifulsoup4
+lxml
+plotly>=5.0.0
+selenium
+webdriver-manager
+lightgbm
+scikit-learn
+openai

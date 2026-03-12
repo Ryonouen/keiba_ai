@@ -1,0 +1,5 @@
+/.DS_Store
+/.keiba_cache
+/__pycache__
+/netkeiba_cookies.json
+/scrape.py.save
