@@ -32,7 +32,8 @@ from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
-from selenium.common.exceptions import NoSuchElementException, NoSuchWindowException, WebDriverException
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.common.exceptions import NoSuchElementException, NoSuchWindowException, WebDriverException, TimeoutException
 
 try:
     import pandas as pd  # type: ignore
@@ -154,6 +155,7 @@ def build_webdriver(headless: bool = True) -> webdriver.Chrome:
     options.add_argument("--use-mock-keychain")
     options.add_argument("--remote-debugging-port=9222")
     options.add_argument("--lang=ja-JP")
+    options.page_load_strategy = "eager"
 
     if headless:
         options.add_argument("--headless=new")
@@ -165,7 +167,7 @@ def build_webdriver(headless: bool = True) -> webdriver.Chrome:
 
     driver = webdriver.Chrome(service=service, options=options)
     driver.implicitly_wait(5)
-    driver.set_page_load_timeout(40)
+    driver.set_page_load_timeout(25)
 
     try:
         driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
@@ -209,26 +211,55 @@ def safe_driver_title(driver: Optional[webdriver.Chrome]) -> str:
         return ""
 
 
-def safe_get(driver: webdriver.Chrome, url: str, headless: bool = True, retries: int = 1) -> webdriver.Chrome:
+def safe_get(driver: webdriver.Chrome, url: str, headless: bool = True, retries: int = 2) -> webdriver.Chrome:
     last_error: Optional[Exception] = None
 
     for attempt in range(retries + 1):
         try:
+            driver.set_page_load_timeout(25)
             driver.get(url)
+
+            try:
+                WebDriverWait(driver, 20).until(
+                    lambda d: d.execute_script("return document.readyState") in ("interactive", "complete")
+                )
+            except Exception:
+                pass
+
             return driver
+
+        except TimeoutException as e:
+            last_error = e
+            print(f"ブラウザ遷移タイムアウト: {url}")
+
+            try:
+                driver.execute_script("window.stop();")
+                page_src = safe_page_source(driver)
+                if page_src and len(page_src) > 1000:
+                    return driver
+            except Exception:
+                pass
+
+            if attempt >= retries:
+                raise e
+
+            driver = restart_driver(driver, headless=headless)
+            random_sleep(2.0, 3.5)
+
         except (NoSuchWindowException, WebDriverException) as e:
             last_error = e
             print(f"ブラウザ遷移失敗: {type(e).__name__}")
             if attempt >= retries:
                 raise e
             driver = restart_driver(driver, headless=headless)
-            random_sleep(1.5, 2.5)
+            random_sleep(2.0, 3.5)
+
         except Exception as e:
             last_error = e
             print(f"ブラウザ遷移エラー: {type(e).__name__}")
             if attempt >= retries:
                 raise e
-            random_sleep(1.5, 2.5)
+            random_sleep(2.0, 3.5)
 
     if last_error is not None:
         raise last_error
