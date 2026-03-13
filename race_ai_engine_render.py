@@ -114,7 +114,7 @@ def emulate_human_behavior(driver: webdriver.Chrome) -> None:
         pass
 
 
-def build_webdriver(headless: bool = False) -> webdriver.Chrome:
+def build_webdriver(headless: bool = True) -> webdriver.Chrome:
     user_agent = os.getenv(
         "NETKEIBA_USER_AGENT",
         "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
@@ -122,6 +122,10 @@ def build_webdriver(headless: bool = False) -> webdriver.Chrome:
 
     chrome_bin = os.getenv("CHROME_BIN", "/usr/bin/chromium")
     chromedriver_path = os.getenv("CHROMEDRIVER_PATH", "/usr/bin/chromedriver")
+
+    # Render / Docker 環境では GUI がないため headless を強制
+    if os.getenv("RENDER") or os.getenv("RENDER_SERVICE_ID") or not os.getenv("DISPLAY"):
+        headless = True
 
     options = Options()
     options.binary_location = chrome_bin
@@ -131,6 +135,7 @@ def build_webdriver(headless: bool = False) -> webdriver.Chrome:
     options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_argument("--disable-gpu")
     options.add_argument("--no-sandbox")
+    options.add_argument("--disable-setuid-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-software-rasterizer")
     options.add_argument("--disable-extensions")
@@ -153,7 +158,11 @@ def build_webdriver(headless: bool = False) -> webdriver.Chrome:
     if headless:
         options.add_argument("--headless=new")
 
-    service = Service(chromedriver_path)
+    service = Service(
+        executable_path=chromedriver_path,
+        log_output="/tmp/chromedriver.log",
+    )
+
     driver = webdriver.Chrome(service=service, options=options)
     driver.implicitly_wait(5)
     driver.set_page_load_timeout(40)
@@ -173,7 +182,7 @@ def build_webdriver(headless: bool = False) -> webdriver.Chrome:
 
     return driver
 
-def restart_driver(old_driver: Optional[webdriver.Chrome], headless: bool = False) -> webdriver.Chrome:
+def restart_driver(old_driver: Optional[webdriver.Chrome], headless: bool = True) -> webdriver.Chrome:
     try:
         if old_driver is not None:
             old_driver.quit()
@@ -200,7 +209,7 @@ def safe_driver_title(driver: Optional[webdriver.Chrome]) -> str:
         return ""
 
 
-def safe_get(driver: webdriver.Chrome, url: str, headless: bool = False, retries: int = 1) -> webdriver.Chrome:
+def safe_get(driver: webdriver.Chrome, url: str, headless: bool = True, retries: int = 1) -> webdriver.Chrome:
     last_error: Optional[Exception] = None
 
     for attempt in range(retries + 1):
@@ -226,7 +235,7 @@ def safe_get(driver: webdriver.Chrome, url: str, headless: bool = False, retries
     return driver
 
 
-def warmup_netkeiba_session(driver: webdriver.Chrome, headless: bool = False) -> webdriver.Chrome:
+def warmup_netkeiba_session(driver: webdriver.Chrome, headless: bool = True) -> webdriver.Chrome:
     driver = safe_get(driver, "https://race.netkeiba.com/", headless=headless, retries=1)
     random_sleep(4.5, 7.0)
     emulate_human_behavior(driver)
@@ -2449,7 +2458,7 @@ def build_winner_condition_ai(past_results: List[Dict[str, Any]]) -> str:
 def analyze_race(
     race_url: str,
     history_limit: int = HISTORY_LIMIT_DEFAULT,
-    headless: bool = False,
+    headless: bool = True,
 ) -> Dict[str, Any]:
     input_url = race_url.strip()
     if "newspaper.html" in input_url:
