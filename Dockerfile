@@ -55,4 +55,4 @@ COPY . /app
 
 EXPOSE 10000
 
-CMD ["sh", "-c", "python -m streamlit run keiba_app.py --server.port ${PORT:-10000} --server.address 0.0.0.0"]
+CMD ["sh", "-c", "python -m streamlit run keiba_app_render.py --server.port ${PORT:-10000} --server.address 0.0.0.0"]
