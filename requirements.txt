@@ -1,12 +1,11 @@
 streamlit
-pandas
-numpy
 requests
 beautifulsoup4
 lxml
-plotly>=5.0.0
+openai
+pandas
+lightgbm
 selenium
 webdriver-manager
-lightgbm
-scikit-learn
-openaiplotly>=5.0.0
+undetected-chromedriver
+plotly

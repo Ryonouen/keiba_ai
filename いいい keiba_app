@@ -2,8 +2,9 @@ import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 
+st.set_page_config(page_title="KEIBA AI", layout="wide")
+
 import datetime
-import re
 import requests
 from bs4 import BeautifulSoup
 
@@ -12,9 +13,6 @@ if "result" not in st.session_state:
 
 from race_ai_engine import (
     analyze_race,
-    apply_bloodline_and_track_bias_to_result,
-    recommend_bets,
-    apply_simple_odds,
     refresh_result_payload,
 )
 
@@ -71,219 +69,77 @@ def roi_label(x):
     return f"{x * 100:.1f}%"
 
 
-def safe_float(value, default=0.0):
-    try:
-        if value in [None, "", "-"]:
-            return default
-        return float(value)
-    except Exception:
-        return default
+# -----------------------------
+# Helper functions for engine/UI compatibility
+# -----------------------------
 
-
-def extract_first_float(text: str):
-    if not text:
-        return None
-    m = re.search(r"(\d+(?:\.\d+)?)", str(text).replace(",", ""))
-    if not m:
-        return None
-    try:
-        return float(m.group(1))
-    except Exception:
-        return None
-
-
-def get_predicted_odds_from_netkeiba(race_url: str):
+def normalize_result_payload(result):
     """
-    netkeibaの出馬表/競馬新聞ページから予想単勝オッズを取得する。
-    取得できた場合は {馬番 or 馬名: オッズ} の辞書を返す。
+    engine側の返却キー差分をUIで吸収する。
     """
-    if not race_url:
-        return {}
+    if not isinstance(result, dict):
+        return result
 
-    def build_candidate_urls(url: str):
-        urls = []
-        if url:
-            urls.append(url)
-        if "shutuba.html" in url:
-            urls.append(url.replace("shutuba.html", "newspaper.html"))
-        if "newspaper.html" in url:
-            urls.append(url.replace("newspaper.html", "shutuba.html"))
-        seen = set()
-        unique = []
-        for u in urls:
-            if u and u not in seen:
-                unique.append(u)
-                seen.add(u)
-        return unique
+    if "ai_bets" not in result:
+        result["ai_bets"] = result.get("recommended_bets", []) or []
 
-    def looks_like_odds_value(val: float) -> bool:
-        return 1.0 <= val <= 500.0
+    if "course_bias_ranking" not in result:
+        result["course_bias_ranking"] = []
 
-    def score_odds_candidate(val: float, raw_text: str, cls_text: str) -> float:
-        score = 0.0
-        text = (raw_text or "").strip()
-        cls = (cls_text or "").lower()
+    if "value_horses" not in result:
+        result["value_horses"] = []
 
-        if "odds" in cls:
-            score += 10
-        if "popular" in cls or "ninki" in cls:
-            score += 4
-        if "." in text:
-            score += 2
-        if 1.0 <= val <= 30.0:
-            score += 1.5
-        elif 30.0 < val <= 100.0:
-            score += 1.0
+    return result
 
-        # 斤量っぽい数値を除外
-        if 50.0 <= val <= 60.0:
-            score -= 6
 
-        return score
+def apply_manual_odds_to_features(features, win_odds_list=None, place_odds_list=None):
+    """
+    UI側で手動入力したオッズを features に反映する簡易ヘルパー。
+    engine側の apply_simple_odds が無くても動作するようにする。
+    """
+    updated = []
+    win_odds_list = win_odds_list or []
+    place_odds_list = place_odds_list or []
 
-    def parse_row_based(soup: BeautifulSoup):
-        odds_map = {}
+    for idx, feature in enumerate(features or []):
+        row = dict(feature)
+        if idx < len(win_odds_list):
+            row["win_odds"] = win_odds_list[idx]
+        if idx < len(place_odds_list):
+            row["place_odds"] = place_odds_list[idx]
+        updated.append(row)
 
-        for tr in soup.select("tr"):
-            horse_name = None
-            horse_no = None
-            odds_val = None
-            odds_score = -999.0
+    return updated
 
-            name_node = (
-                tr.select_one("td.HorseName a")
-                or tr.select_one("td[class*='HorseName'] a")
-                or tr.select_one("a[href*='/horse/']")
-            )
-            if name_node and name_node.get_text(strip=True):
-                horse_name = name_node.get_text(strip=True)
-            else:
-                continue
 
-            no_node = (
-                tr.select_one("td.Umaban")
-                or tr.select_one("td[class*='Umaban']")
-                or tr.select_one("td.Horse_Num")
-                or tr.select_one("td[class*='Horse_Num']")
-            )
-            if no_node:
-                no_val = extract_first_float(no_node.get_text(" ", strip=True))
-                if no_val is not None:
-                    horse_no = str(int(no_val))
+def explain_engine_error(result):
+    """
+    engine側の error コードを、UIで分かりやすい文言に変換する。
+    """
+    if not isinstance(result, dict):
+        return "AI分析結果の形式が不正です。"
 
-            for cell in tr.select("td, th, span, div"):
-                text = cell.get_text(" ", strip=True)
-                if not text:
-                    continue
-                cls_text = " ".join(cell.get("class", []))
-                found = re.findall(r"\d+(?:\.\d+)?", text.replace(",", ""))
-                for x in found:
-                    try:
-                        val = float(x)
-                    except Exception:
-                        continue
-                    if not looks_like_odds_value(val):
-                        continue
-                    cand_score = score_odds_candidate(val, text, cls_text)
-                    if cand_score > odds_score:
-                        odds_score = cand_score
-                        odds_val = val
+    error_code = str(result.get("error") or "").strip()
+    race_meta = result.get("race_meta") or {}
+    race_info_text = str(race_meta.get("race_info_text") or "").strip()
 
-            if odds_val is not None:
-                if horse_no is not None:
-                    odds_map[horse_no] = odds_val
-                if horse_name:
-                    odds_map[horse_name] = odds_val
-
-        return odds_map
-
-    def parse_table_based(url: str, html_text: str):
-        odds_map = {}
-        try:
-            tables = pd.read_html(html_text)
-        except Exception:
-            return odds_map
-
-        for tbl in tables:
-            df_tbl = tbl.copy()
-            df_tbl.columns = [str(c) for c in df_tbl.columns]
-
-            horse_col = None
-            no_col = None
-            odds_col = None
-
-            for c in df_tbl.columns:
-                c_str = str(c)
-                if horse_col is None and any(k in c_str for k in ["馬名", "Horse"]):
-                    horse_col = c
-                if no_col is None and any(k in c_str for k in ["馬番", "Umaban", "馬 番"]):
-                    no_col = c
-                if odds_col is None and any(k in c_str.lower() for k in ["odds", "単勝", "予想オッズ"]):
-                    odds_col = c
-
-            if horse_col is None or odds_col is None:
-                continue
-
-            for _, r in df_tbl.iterrows():
-                horse_name = str(r.get(horse_col, "")).strip()
-                if not horse_name or horse_name == "nan":
-                    continue
-
-                odds_val = extract_first_float(r.get(odds_col, ""))
-                if odds_val is None or not looks_like_odds_value(float(odds_val)):
-                    continue
-
-                horse_no = None
-                if no_col is not None:
-                    no_val = extract_first_float(r.get(no_col, ""))
-                    if no_val is not None:
-                        horse_no = str(int(no_val))
-
-                if horse_no is not None:
-                    odds_map[horse_no] = float(odds_val)
-                odds_map[horse_name] = float(odds_val)
-
-        return odds_map
-
-    candidate_urls = build_candidate_urls(race_url)
-
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-        "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
-        "Referer": "https://race.netkeiba.com/",
-        "Cache-Control": "no-cache",
-        "Pragma": "no-cache",
+    mapping = {
+        "HTTP_BLOCKED_OR_EMPTY": "netkeiba側でアクセス制限、またはページ取得失敗が発生しています。少し時間を空けて再実行してください。",
+        "HTTP400_BLOCKED": "netkeiba側でアクセス制限が発生しています。少し時間を空けて再実行してください。",
+        "NO_HORSES_FOUND": "出馬表ページは開けましたが、馬一覧を抽出できませんでした。対象URLが出馬表ページか確認してください。",
+        "NO_RECORDS_FOUND": "各馬の近走データを取得できませんでした。競馬新聞ページまたは各馬詳細ページの取得に失敗しています。",
+        "FEATURE_BUILD_FAILED": "馬データは取得できましたが、AI分析用の特徴量生成で失敗しました。",
     }
 
-    best_map = {}
+    if error_code in mapping:
+        if race_info_text:
+            return f"{mapping[error_code]}\n\n詳細: {race_info_text}"
+        return mapping[error_code]
 
-    for target_url in candidate_urls:
-        try:
-            res = requests.get(target_url, headers=headers, timeout=12)
-            if res.status_code != 200:
-                continue
+    if race_info_text:
+        return race_info_text
 
-            html_text = res.text
-            soup = BeautifulSoup(html_text, "html.parser")
-
-            table_map = parse_table_based(target_url, html_text)
-            row_map = parse_row_based(soup)
-
-            merged = {}
-            merged.update(table_map)
-            merged.update(row_map)
-
-            horse_name_count = len([k for k in merged.keys() if not str(k).isdigit()])
-            if horse_name_count > len([k for k in best_map.keys() if not str(k).isdigit()]):
-                best_map = merged
-
-            if horse_name_count >= 8:
-                return merged
-
-        except Exception:
-            continue
-
-    return best_map
+    return "出馬表データを取得できませんでした。URLまたは対象ページを確認してください。"
 
 
 # -----------------------------
@@ -340,12 +196,6 @@ def get_today_races():
 
 
 # -----------------------------
-# PAGE
-# -----------------------------
-
-st.set_page_config(page_title="KEIBA AI", layout="wide")
-
-# -----------------------------
 # UI STYLE
 # -----------------------------
 
@@ -389,10 +239,6 @@ html, body, [data-testid="stAppViewContainer"] {
   padding-bottom: 1.2rem;
   padding-left: 1.2rem;
   padding-right: 1.2rem;
-}
-/* 手動オッズ入力の横幅を詰める */
-div[data-testid="column"] {
-  gap: 0.2rem;
 }
 
 /* テキストの読みやすさを担保するため、基本カラーを統一 */
@@ -515,51 +361,6 @@ textarea {
 .stProgress > div > div{
   background: linear-gradient(90deg, var(--accent-green), var(--accent-pink));
 }
-
-/* Expander header/body readability fix */
-div[data-testid="stExpander"] {
-  border: 1px solid rgba(0, 255, 0, 0.18);
-  border-radius: 12px;
-  background: rgba(17, 24, 39, 0.55);
-  overflow: hidden;
-  margin-bottom: 10px;
-}
-
-div[data-testid="stExpander"] summary {
-  background: rgba(255, 255, 255, 0.04);
-  color: var(--text-color) !important;
-  font-size: 13px !important;
-  line-height: 1.6 !important;
-  padding: 10px 14px !important;
-}
-
-div[data-testid="stExpander"] summary p,
-div[data-testid="stExpander"] summary span,
-div[data-testid="stExpander"] summary div {
-  color: var(--text-color) !important;
-  font-size: 13px !important;
-  line-height: 1.6 !important;
-  white-space: normal !important;
-  word-break: break-word !important;
-}
-
-div[data-testid="stExpanderDetails"] {
-  padding-top: 6px;
-}
-
-/* Number input readability */
-[data-testid="stNumberInput"] {
-  margin-bottom: 6px;
-}
-
-</style>
-    """
-    + """
-<style>
-/* 手動オッズ入力の1行をコンパクトに */
-div[data-testid="stHorizontalBlock"] {
-  align-items: center;
-}
 </style>
     """,
     unsafe_allow_html=True,
@@ -640,17 +441,19 @@ if analyze:
             try:
                 st.write("レースデータ取得中...")
                 result = analyze_race(race_url)
+                result = normalize_result_payload(result)
                 st.session_state.result = result
             except Exception as e:
                 st.error("AI分析エラー")
                 st.exception(e)
+                st.caption(f"入力URL: {race_url}")
 
 # --- Use stored result so Streamlit reruns don't reset the page ---
 if st.session_state.result:
 
     result = st.session_state.result
 
-    result = apply_bloodline_and_track_bias_to_result(result)
+    result = normalize_result_payload(result)
 
     features = result["features"]
 
@@ -658,6 +461,7 @@ if st.session_state.result:
 
     # --- Recalculate AI metrics so ai_power_index / probabilities are populated ---
     result = refresh_result_payload(result)
+    result = normalize_result_payload(result)
     df = pd.DataFrame(result["features"])
 
     # -------------------------------------------------
@@ -921,114 +725,10 @@ if st.session_state.result:
 
 
     if df.empty:
-        st.error("出馬表データを取得できませんでした。URLまたは対象ページを確認してください。")
+        st.error(explain_engine_error(result))
+        if result.get("error"):
+            st.caption(f"error_code: {result.get('error')}")
         st.stop()
-
-    # 出馬表順（馬番優先、無ければ枠順）
-    if "horse_number" in df.columns:
-        df_sorted = df.sort_values("horse_number")
-    elif "umaban" in df.columns:
-        df_sorted = df.sort_values("umaban")
-    elif "gate" in df.columns:
-        df_sorted = df.sort_values("gate")
-    else:
-        df_sorted = df.copy()
-
-    # -----------------------------
-    # MANUAL ODDS INPUT / FETCH
-    # -----------------------------
-
-    with st.expander("🎯 単勝オッズ入力・取得", expanded=False):
-        st.caption("通常は自動取得を使用し、取得失敗時のみ手動入力を使ってください。")
-
-        if st.button("netkeibaの予想オッズを取得", key="fetch_predicted_odds_btn"):
-            normalized_race_url = race_url.strip()
-            fetched_odds = get_predicted_odds_from_netkeiba(normalized_race_url)
-
-            if fetched_odds:
-                applied_count = 0
-                for idx, row in df.iterrows():
-                    horse_no = row.get("horse_number", row.get("umaban", row.get("gate", "")))
-                    horse_no_key = str(int(horse_no)) if pd.notna(horse_no) and str(horse_no) != "" else None
-                    horse_name = row.get("horse_name", "")
-
-                    matched_odds = None
-                    if horse_no_key and horse_no_key in fetched_odds:
-                        matched_odds = fetched_odds[horse_no_key]
-                    elif horse_name and horse_name in fetched_odds:
-                        matched_odds = fetched_odds[horse_name]
-
-                    if matched_odds is not None:
-                        df.loc[idx, "win_odds"] = matched_odds
-                        applied_count += 1
-
-                result["features"] = df.to_dict("records")
-
-                if applied_count > 0:
-                    st.success(f"予想オッズを {applied_count} 頭に反映しました")
-                    st.session_state.result = result
-                    st.rerun()
-                else:
-                    st.warning("予想オッズ候補は取得できましたが、馬名または馬番との照合に失敗しました。競馬新聞URL（newspaper.html）でも試してください。")
-            else:
-                st.warning("netkeibaから予想オッズを取得できませんでした。shutuba.html / newspaper.html の両方を自動で試しましたが取得できないため、必要な場合のみ下の手動オッズ入力を使用してください。")
-
-        with st.expander("手動オッズ入力", expanded=False):
-            st.caption("自動取得が失敗した場合のみ、各馬の単勝オッズを入力してください。")
-
-            head1, head2, head3 = st.columns([4.2, 1.2, 1.6], gap="small")
-            head1.markdown("**馬名**")
-            head2.markdown("")
-            head3.markdown("**単勝オッズ**")
-
-            current_manual_odds = {}
-
-            for row_idx, row in df_sorted.iterrows():
-                horse_no = row.get("horse_number", row.get("umaban", row.get("gate", "")))
-                horse_name = row.get("horse_name", f"馬{row_idx+1}")
-                label = f"{horse_no}番 {horse_name}" if str(horse_no) not in ["", "nan", "None"] else horse_name
-
-                current_val = st.session_state.get(
-                    f"manual_win_odds_input_{row_idx}",
-                    safe_float(row.get("win_odds", 0.0), 0.0),
-                )
-
-                row_col1, row_col2, row_col3 = st.columns([4.2, 1.2, 1.6], gap="small")
-                with row_col1:
-                    st.markdown(
-                        f"<div style='padding-top: 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;'><b>{label}</b></div>",
-                        unsafe_allow_html=True,
-                    )
-                with row_col2:
-                    st.markdown(
-                        "<div style='padding-top: 8px; text-align: center; color: #94A3B8;'>：</div>",
-                        unsafe_allow_html=True,
-                    )
-                with row_col3:
-                    val = st.number_input(
-                        "オッズ",
-                        min_value=0.0,
-                        step=0.1,
-                        value=float(current_val),
-                        key=f"manual_win_odds_input_{row_idx}",
-                        label_visibility="collapsed",
-                    )
-
-                if val > 0:
-                    current_manual_odds[row_idx] = float(val)
-
-            if st.button("入力した単勝オッズをAIに反映", key="apply_manual_win_odds_btn"):
-                for row_idx, odds in current_manual_odds.items():
-                    df.loc[row_idx, "win_odds"] = odds
-
-                result["features"] = df.to_dict("records")
-                result = refresh_result_payload(result)
-                st.session_state.result = result
-                df = pd.DataFrame(result["features"])
-                df = apply_ai_adjustments(df)
-                result["features"] = df.to_dict("records")
-                st.session_state.result = result
-                st.rerun()
 
     # -----------------------------
     # MANUAL RUNNING STYLE INPUT (脚質手動補正)
@@ -1046,6 +746,13 @@ if st.session_state.result:
         }
 
         manual_styles = {}
+
+        # --- Improve UI readability by grouping horses ---
+        # 出馬表順（枠順ベース）に並び替え
+        if "gate" in df.columns:
+            df_sorted = df.sort_values("gate")
+        else:
+            df_sorted = df.copy()
 
 
 
@@ -1090,8 +797,7 @@ if st.session_state.result:
         for idx, (i, row) in enumerate(df_sorted.iterrows()):
             col = cols[idx % 2]
             with col:
-                horse_no = row.get("horse_number", row.get("umaban", row.get("gate", "")))
-                gate = horse_no
+                gate = row.get("gate", "")
                 horse = row.get("horse_name", f"馬{i+1}")
                 label = f"{gate}番 {horse}" if gate != "" else horse
                 choice = st.radio(
@@ -1554,5 +1260,23 @@ if st.session_state.result:
 
         st.markdown(f'<div class="card">{comment}</div>', unsafe_allow_html=True)
 
-        with st.expander("オッズ補正メモ", expanded=False):
-            st.caption("上部の『🎯 単勝オッズ入力・取得』内の『手動オッズ入力』から必要時のみ入力してください。")
+        with st.expander("オッズ手動入力・補正", expanded=False):
+            st.caption("自動取得に失敗したときのみ使用してください")
+            manual_win2 = st.text_input("単勝オッズ再入力（カンマ区切り）", key="manual_win2")
+            manual_place2 = st.text_input("複勝オッズ再入力（カンマ区切り）", key="manual_place2")
+            if st.button("オッズを再適用"):
+                try:
+                    win_list = [float(x.strip()) for x in manual_win2.split(",")] if manual_win2 else []
+                    place_list = [float(x.strip()) for x in manual_place2.split(",")] if manual_place2 else []
+                    result["features"] = apply_manual_odds_to_features(
+                        result["features"],
+                        win_odds_list=win_list,
+                        place_odds_list=place_list
+                    )
+                    result = refresh_result_payload(result)
+                    result = normalize_result_payload(result)
+                    st.session_state.result = result
+                    st.success("オッズを再適用しました。最新のAI評価に更新済みです。")
+                    df = pd.DataFrame(result["features"])
+                except Exception:
+                    st.error("オッズ入力形式が不正です")
